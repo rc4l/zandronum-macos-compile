@@ -1,9 +1,8 @@
-<table align="center">
-  <tr>
-    <td><img src="docs/logo.png" width="340"></td>
-    <td><img src="docs/preview.png" width="340"></td>
-  </tr>
-</table>
+<p align="center">
+  <img src="docs/logo.png" width="340">
+  &nbsp;&nbsp;
+  <img src="docs/preview.png" width="340">
+</p>
 
 # Zandronum EZ macOS Compilation
 
