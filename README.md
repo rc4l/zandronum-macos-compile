@@ -1,10 +1,11 @@
-<p align="center">
-  <img src="docs/logo.png" width="380">
-</p>
+<table align="center">
+  <tr>
+    <td><img src="docs/logo.png" width="340"></td>
+    <td><img src="docs/preview.png" width="340"></td>
+  </tr>
+</table>
 
 # Zandronum EZ macOS Compilation
-
-<img src="docs/preview.png" width="384">
 
 ![Build Status](https://img.shields.io/github/actions/workflow/status/rc4l/zandronum-macos-compile/manual-build-latest.yml?label=build%20status)
 ![Last Build Date](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rc4l/zandronum-macos-compile/badges/build-date-badge.json)
