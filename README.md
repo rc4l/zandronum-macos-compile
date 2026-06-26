@@ -4,7 +4,7 @@
 
 # Zandronum EZ macOS Compilation
 
-<img src="docs/preview.png" width="700">
+<img src="docs/preview.png" width="384">
 
 ![Build Status](https://img.shields.io/github/actions/workflow/status/rc4l/zandronum-macos-compile/manual-build-latest.yml?label=build%20status)
 ![Last Build Date](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/rc4l/zandronum-macos-compile/badges/build-date-badge.json)
@@ -21,11 +21,6 @@ This project gives you a super easy way to develop the [Zandronum source port](h
    ```
 2. Then run: `./build.sh` to setup everything. This'll take a while the first time. You should see a runnable game in `build/`.
 3. You can now make code changes in `src/zandronum` (never in `build/`) and rerun `./build.sh` to update your game.
-
-## Sound and Apple Silicon
-`./build.sh` builds with full audio by default. FMOD (the audio library Zandronum uses) was never released for Apple Silicon, so on those Macs the build is compiled for Intel and runs under Rosetta 2, which is installed automatically if it's missing. On an Intel Mac it just builds natively.
-
-If you'd rather have a native Apple Silicon build and don't care about in-game audio, run `SOUND=0 ./build.sh`.
 
 # Technical Details
 
@@ -54,6 +49,11 @@ If you'd rather have a native Apple Silicon build and don't care about in-game a
 | Opus                      | 1.5.2        | Homebrew (native) or committed in tools/opus/ (Intel build)                | Homebrew/Portable | Lets Zandronum use voice chat in multiplayer games.                                                           | Committed source archive, built for the Intel build |
 | FMOD Ex                   | 4.44.64      | https://zdoom.org/files/fmod/ (downloaded dmg)                             | Portable          | Lets Zandronum play music and sound effects.                                                                  | Intel only; downloaded and staged to deps/ |
 | Freedoom WADs             | Latest       | https://freedoom.github.io/ (mirrored in tools/freedoom/)                  | Portable          | Free game data so you can run and test Zandronum even if you don't own Doom.                                  | Placed next to the binary in build/ |
+
+## Sound and Apple Silicon
+`./build.sh` builds with full audio by default. FMOD (the audio library Zandronum uses) was never released for Apple Silicon, so on those Macs the build is compiled for Intel and runs under Rosetta 2, which is installed automatically if it's missing. On an Intel Mac it just builds natively.
+
+If you'd rather have a native Apple Silicon build and don't care about in-game audio, run `SOUND=0 ./build.sh`.
 
 ## License
 This build system is provided as-is for convenience. Zandronum and all third-party dependencies retain their original licenses. See their respective sites for details.
