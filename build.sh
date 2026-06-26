@@ -201,7 +201,9 @@ get_fmod() {
     [[ -f "$dmg" ]] || curl -L --fail -o "$dmg" "$FMOD_DMG_URL"
     local mnt; mnt="$(mktemp -d)"
     hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$mnt"
-    local api; api="$(find "$mnt" -type d -name api -maxdepth 3 | head -1)"
+    # 2>/dev/null + || true: a freshly mounted dmg has a .Trashes dir the runner
+    # user can't read, which makes find exit non-zero and trip `set -e`.
+    local api; api="$(find "$mnt" -maxdepth 3 -type d -name api 2>/dev/null | head -1 || true)"
     [[ -n "$api" ]] || { hdiutil detach "$mnt" -quiet; die "FMOD api/ dir not found in dmg."; }
     mkdir -p "$fmod_dir"; cp -R "$api/inc" "$fmod_dir/include"; cp -R "$api/lib" "$fmod_dir/lib"
     hdiutil detach "$mnt" -quiet
