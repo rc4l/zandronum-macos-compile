@@ -7,7 +7,12 @@ import sys
 from PIL import Image
 
 def main(src_path, iconset_dir):
-    src = Image.open(src_path).convert("RGBA")
+    img = Image.open(src_path)
+    # A Windows .ico packs several sizes; decode the largest square frame.
+    if getattr(img, "format", None) == "ICO":
+        img.size = max(img.ico.sizes())
+        img.load()
+    src = img.convert("RGBA")
     # Standard iconset entries: (px size, filename).  Each logical size needs a
     # 1x and a 2x ("@2x") variant so Retina displays get a crisp icon.
     entries = []

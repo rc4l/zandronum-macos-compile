@@ -345,7 +345,10 @@ _bundle_deps() {
 
 make_icon() {
     local resources="$1"
-    local logo="$SCRIPT_ROOT/docs/logo.png"
+    # Prefer Zandronum's square Windows app icon (a proper dock tile); fall back
+    # to the wide wordmark logo if the source tree doesn't have it.
+    local logo="$ZAN_SRC_DIR/src/win32/zandronum.ico"
+    [[ -f "$logo" ]] || logo="$SCRIPT_ROOT/docs/logo.png"
     have python3 && have iconutil && [[ -f "$logo" ]] || { warn "skipping icon (tooling/logo missing)"; return 0; }
     local iconset; iconset="$(mktemp -d)/$APP_NAME.iconset"; mkdir -p "$iconset"
     if python3 "$TOOLS_DIR/make-iconset.py" "$logo" "$iconset" 2>/dev/null \
