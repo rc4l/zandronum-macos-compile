@@ -39,6 +39,10 @@ X86_SRC="$DEPS_DIR/x86src"            # scratch dir for x86_64 dep source trees
 DEFAULT_ZANDRONUM_REF="${ZANDRONUM_REF:-ZA_3.2.1}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 
+# macOS .app bundle that build/ ships in addition to the loose binary.
+APP_NAME="Zandronum"
+BUNDLE_ID="org.zandronum.zandronum"
+
 HOST_ARCH="$(uname -m)"                 # arm64 | x86_64
 WANT_SOUND="${SOUND:-1}"                # 0 = native build without FMOD audio
 
@@ -288,6 +292,146 @@ build() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# .app bundle
+#
+# Zandronum's SDL build sets progdir from the executable's own directory
+# (realpath of argv[0]), and that's where it looks for its pk3/wad data.  So a
+# self-contained bundle is just: binary + data + dylibs together under
+# Contents/MacOS/, with every non-system dylib reference rewritten to
+# @loader_path so the app runs after being moved or copied to another Mac.
+# ---------------------------------------------------------------------------
+
+# Resolve a dylib install-name (which may be absolute, @loader_path/..., or a
+# bare leafname) to an actual file on disk, searching a list of known dirs.
+# Echoes the resolved path, or nothing if it can't be found.
+_resolve_dylib() {
+    local ref="$1"; shift
+    local leaf="${ref##*/}"
+    [[ "$ref" == /* && -f "$ref" ]] && { echo "$ref"; return; }
+    local dir
+    for dir in "$@"; do
+        [[ -f "$dir/$leaf" ]] && { echo "$dir/$leaf"; return; }
+    done
+}
+
+# Recursively copy a Mach-O's non-system dynamic dependencies into the bundle's
+# MacOS dir and repoint every reference (and each copied dylib's own id) at
+# @loader_path.  System libs (/usr/lib, /System) are left untouched.
+declare -a _BUNDLED=()
+_bundle_deps() {
+    local macho="$1" macos_dir="$2"; shift 2
+    local search=("$@")
+    local ref leaf src
+    while IFS= read -r ref; do
+        [[ "$ref" == /usr/lib/* || "$ref" == /System/* ]] && continue
+        [[ "$ref" == "$(otool -D "$macho" | tail -n +2 | head -1)" ]] && continue  # skip self id
+        leaf="${ref##*/}"
+        # Already staged this dylib? Just fix the referrer and move on.
+        if [[ " ${_BUNDLED[*]} " == *" $leaf "* ]]; then
+            install_name_tool -change "$ref" "@loader_path/$leaf" "$macho" 2>/dev/null || true
+            continue
+        fi
+        src="$(_resolve_dylib "$ref" "${search[@]}")" || true
+        [[ -n "$src" ]] || { warn "could not resolve dylib '$ref' for bundling"; continue; }
+        cp -L "$src" "$macos_dir/$leaf"
+        chmod u+w "$macos_dir/$leaf"
+        _BUNDLED+=("$leaf")
+        install_name_tool -id "@loader_path/$leaf" "$macos_dir/$leaf" 2>/dev/null || true
+        install_name_tool -change "$ref" "@loader_path/$leaf" "$macho" 2>/dev/null || true
+        _bundle_deps "$macos_dir/$leaf" "$macos_dir" "${search[@]}"   # transitive deps
+    done < <(otool -L "$macho" | tail -n +2 | awk '{print $1}')
+}
+
+make_icon() {
+    local resources="$1"
+    local logo="$SCRIPT_ROOT/docs/logo.png"
+    have python3 && have iconutil && [[ -f "$logo" ]] || { warn "skipping icon (tooling/logo missing)"; return 0; }
+    local iconset; iconset="$(mktemp -d)/$APP_NAME.iconset"; mkdir -p "$iconset"
+    if python3 "$TOOLS_DIR/make-iconset.py" "$logo" "$iconset" 2>/dev/null \
+       && iconutil -c icns "$iconset" -o "$resources/$APP_NAME.icns" 2>/dev/null; then
+        echo "$APP_NAME.icns"          # CFBundleIconFile value
+    else
+        warn "icon generation failed; bundle will have no custom icon"
+    fi
+}
+
+make_app_bundle() {
+    status "Assembling $APP_NAME.app..."
+    local app="$BUILD_DIR/$APP_NAME.app"
+    local macos="$app/Contents/MacOS" resources="$app/Contents/Resources"
+    rm -rf "$app"
+    mkdir -p "$macos" "$resources"
+
+    # Binary + game data live together so progdir (= MacOS dir) finds the data.
+    cp "$BUILD_DIR/zandronum" "$macos/zandronum"
+    chmod u+w "$macos/zandronum"
+    local f
+    for f in "$BUILD_DIR"/*.pk3 "$BUILD_DIR"/*.wad; do
+        [[ -e "$f" ]] && cp "$f" "$macos/"
+    done
+
+    # Stage and re-point dylibs.  In SOUND=1 the deps are the from-source x86_64
+    # libs; in SOUND=0 they're Homebrew's.  The recursive pass follows the link
+    # graph; sdl12-compat dlopens SDL2 at runtime (no link-time edge), so SDL2
+    # is staged explicitly and found via @executable_path next to the binary.
+    _BUNDLED=()
+    local search
+    if [[ "$WANT_SOUND" == "1" ]]; then
+        search=("$X86_PREFIX/lib" "$DEPS_DIR/fmod/lib" "$macos")
+        cp "$X86_PREFIX/lib/libSDL2-2.0.0.dylib" "$macos/" && chmod u+w "$macos/libSDL2-2.0.0.dylib"
+        _BUNDLED+=("libSDL2-2.0.0.dylib")
+        install_name_tool -id "@loader_path/libSDL2-2.0.0.dylib" "$macos/libSDL2-2.0.0.dylib" 2>/dev/null || true
+    else
+        local sdl; sdl="$(brew --prefix sdl12-compat)"
+        search=("$(brew --prefix)/lib" "$sdl/lib" "$macos")
+        if [[ -f "$sdl/lib/libSDL2-2.0.0.dylib" ]]; then
+            cp -L "$sdl/lib/libSDL2-2.0.0.dylib" "$macos/" && chmod u+w "$macos/libSDL2-2.0.0.dylib"
+            _BUNDLED+=("libSDL2-2.0.0.dylib")
+            install_name_tool -id "@loader_path/libSDL2-2.0.0.dylib" "$macos/libSDL2-2.0.0.dylib" 2>/dev/null || true
+        fi
+    fi
+    _bundle_deps "$macos/zandronum" "$macos" "${search[@]}"
+
+    local icon; icon="$(make_icon "$resources")"
+
+    # Version string from the checked-out Zandronum tag (e.g. ZA_3.2.1 -> 3.2.1).
+    local ver="${DEFAULT_ZANDRONUM_REF#ZA_}"
+    cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key><string>$APP_NAME</string>
+	<key>CFBundleDisplayName</key><string>$APP_NAME</string>
+	<key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
+	<key>CFBundleExecutable</key><string>zandronum</string>
+	<key>CFBundlePackageType</key><string>APPL</string>
+	<key>CFBundleShortVersionString</key><string>$ver</string>
+	<key>CFBundleVersion</key><string>$ver</string>
+	<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+	<key>LSMinimumSystemVersion</key><string>10.9</string>
+	<key>NSHighResolutionCapable</key><true/>
+	<key>NSPrincipalClass</key><string>NSApplication</string>${icon:+
+	<key>CFBundleIconFile</key><string>$icon</string>}
+</dict>
+</plist>
+PLIST
+
+    # install_name_tool invalidates code signatures; ad-hoc re-sign so the loader
+    # accepts the Mach-Os, incl. on Apple Silicon under Rosetta.  Sign the dylibs
+    # first, then deep-sign the bundle to seal the main executable.  (Signing the
+    # executable on its own trips over the sibling pk3/wad data files, so let the
+    # deep bundle sign handle it.)
+    if have codesign; then
+        for f in "$macos"/*.dylib; do
+            [[ -e "$f" ]] && codesign --force --sign - "$f" >/dev/null 2>&1 || true
+        done
+        codesign --force --deep --sign - "$app" >/dev/null 2>&1 || true
+    fi
+    status "$APP_NAME.app ready: $app"
+}
+
 show_results() {
     status "Build results:"
     local bin="$BUILD_DIR/zandronum"
@@ -295,12 +439,13 @@ show_results() {
         echo "  binary: $bin"
         lipo -info "$bin" | sed 's/^/  /'
         ls -lh "$bin" | awk '{print "  size: "$5}'
-        if [[ "$WANT_SOUND" == "1" ]]; then
-            echo "  To run (under Rosetta):"
-            echo "    cd build && DYLD_LIBRARY_PATH=\"$X86_PREFIX/lib:\$PWD\" arch -x86_64 ./zandronum"
-        fi
     else
         warn "zandronum binary not found in $BUILD_DIR"
+    fi
+    local app="$BUILD_DIR/$APP_NAME.app"
+    if [[ -d "$app" ]]; then
+        echo "  app bundle: $app  (self-contained; double-click or 'open' it)"
+        echo "  run from terminal: open \"$app\""
     fi
     ls -1 "$BUILD_DIR"/*.pk3 2>/dev/null | sed 's/^/  pk3: /' || true
 }
@@ -320,6 +465,7 @@ main() {
     fi
     configure
     build
+    make_app_bundle
     show_results
     status "Done."
 }

@@ -19,7 +19,7 @@ This project gives you a super easy way to develop the [Zandronum source port](h
    git clone https://github.com/rc4l/zandronum-macos-compile.git
    cd zandronum-macos-compile
    ```
-2. Then run: `./build.sh` to setup everything. This'll take a while the first time. You should see a runnable game in `build/`.
+2. Then run: `./build.sh` to setup everything. This'll take a while the first time. You should see a runnable `Zandronum.app` in `build/` (just double-click it to play).
 3. You can now make code changes in `src/zandronum` (never in `build/`) and rerun `./build.sh` to update your game.
 
 # Technical Details
@@ -30,7 +30,7 @@ This project gives you a super easy way to develop the [Zandronum source port](h
 - Do you just want to do a clean reinstall but keep your code changes? Delete `/deps` and `/build` and then rerun it.
 
 ## Output
-- `build/`: This is where your compiled Zandronum program and all the files it needs to run will appear. If you want to play or test, look here for the `zandronum` binary.
+- `build/`: This is where your compiled Zandronum appears. The easiest thing to run is **`build/Zandronum.app`** — a normal macOS app you can double-click (or `open build/Zandronum.app`). The loose `zandronum` binary and its data files are still here too if you prefer the command line.
 - `deps/`: This folder holds all the stuff the script downloads and builds to make the build work (libraries, FMOD, etc). You almost never need to touch this.
 - `src/zandronum`: The Zandronum source code (edit your code here).
 
@@ -48,7 +48,7 @@ This project gives you a super easy way to develop the [Zandronum source port](h
 | OpenSSL                   | 3.5.1        | Homebrew (native) or source (Intel build)                                  | Homebrew/Portable | Lets Zandronum connect to servers securely (for multiplayer over the internet).                               | Native from Homebrew; Intel built statically from source |
 | Opus                      | 1.5.2        | Homebrew (native) or committed in tools/opus/ (Intel build)                | Homebrew/Portable | Lets Zandronum use voice chat in multiplayer games.                                                           | Committed source archive, built for the Intel build |
 | FMOD Ex                   | 4.44.64      | https://zdoom.org/files/fmod/ (downloaded dmg)                             | Portable          | Lets Zandronum play music and sound effects.                                                                  | Intel only; downloaded and staged to deps/ |
-| Freedoom WADs             | Latest       | https://freedoom.github.io/ (mirrored in tools/freedoom/)                  | Portable          | Free game data so you can run and test Zandronum even if you don't own Doom.                                  | Placed next to the binary in build/ |
+| Freedoom WADs             | Latest       | https://freedoom.github.io/ (mirrored in tools/freedoom/)                  | Portable          | Free game data so you can run and test Zandronum even if you don't own Doom.                                  | Bundled into Zandronum.app (and next to the loose binary) |
 
 ## Sound and Apple Silicon
 `./build.sh` builds with full audio by default. FMOD (the audio library Zandronum uses) was never released for Apple Silicon, so on those Macs the build is compiled for Intel and runs under Rosetta 2, which is installed automatically if it's missing. On an Intel Mac it just builds natively.
