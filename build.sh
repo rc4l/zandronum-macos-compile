@@ -4,24 +4,24 @@
 #
 # macOS counterpart to build.ps1. Terminal-only, "run and go".
 #
-#   ./build.sh                 # native build for this Mac's CPU (arm64 or x86_64)
-#   SOUND=1 ./build.sh         # full FMOD audio (forces x86_64 + Rosetta on Apple Silicon)
-#   ARCH=x86_64 ./build.sh     # force a specific architecture
+#   ./build.sh                 # full build with FMOD audio (default)
+#   SOUND=0 ./build.sh         # native build, no audio (faster; native arm64 on Apple Silicon)
+#   ARCH=arm64 ./build.sh      # force a specific architecture
 #
 # Layout mirrors the Windows build: src/zandronum (source), deps/ (downloads),
 # build/ (output).  Source is NEVER patched (touchless rule).
 #
-# Two working paths (both proven on an M1 Max, 2026-06-26, untouched ZA_3.2.1):
+# Two build modes (both proven on an M1 Max, 2026-06-26, untouched ZA_3.2.1):
 #
-#   NATIVE (default on Apple Silicon)  -- arch = host, deps from Homebrew
-#     Builds a native arm64 binary, but WITHOUT audio: FMOD Ex 4.44.64 ships
-#     x86_64/i386 only (no arm64, closed-source, abandoned), so -DNO_SOUND=ON.
+#   DEFAULT (sound on)  -- arch = x86_64, FULL FMOD audio + Opus VoIP
+#     FMOD Ex 4.44.64 ships x86_64/i386 only (no arm64, closed-source, abandoned),
+#     so the audio build is x86_64; on Apple Silicon it runs under Rosetta 2
+#     (installed automatically if missing). The x86_64 deps are built from source
+#     into deps/x86 (Homebrew bottles are arm64-only), FMOD is linked, and the
+#     runtime dylibs are staged next to the binary.
 #
-#   SOUND=1  -- arch = x86_64, runs under Rosetta 2, FULL FMOD audio + Opus VoIP
-#     Builds the x86_64 deps from source into deps/x86 (Homebrew bottles are
-#     arm64-only and won't link into an x86_64 binary), links FMOD, and stages
-#     the runtime dylibs next to the binary.  Verified to launch and initialise
-#     FMOD + VoIP under Rosetta.
+#   SOUND=0  -- arch = host, deps from Homebrew, but WITHOUT audio (-DNO_SOUND=ON)
+#     On Apple Silicon this gives a native arm64 binary.
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ DEFAULT_ZANDRONUM_REF="${ZANDRONUM_REF:-ZA_3.2.1}"
 CONFIGURATION="${CONFIGURATION:-Release}"
 
 HOST_ARCH="$(uname -m)"                 # arm64 | x86_64
-WANT_SOUND="${SOUND:-0}"                # 1 = build with FMOD audio
+WANT_SOUND="${SOUND:-1}"                # 0 = native build without FMOD audio
 
 # Decide target architecture: explicit ARCH wins; SOUND=1 forces x86_64; else native.
 if [[ -n "${ARCH:-}" ]]; then
@@ -236,6 +236,11 @@ configure() {
         -DCMAKE_BUILD_TYPE="$CONFIGURATION"
         -DCMAKE_OSX_ARCHITECTURES="$TARGET_ARCH"
         -DCMAKE_EXE_LINKER_FLAGS="$APPLE_FRAMEWORKS"
+        # macOS has no system libjpeg, so find_package(JPEG) can latch onto a stray
+        # arm64 Homebrew libjpeg and fail the x86_64 link with undefined symbols.
+        # Force the bundled jpeg-6b instead. (zlib/bzip2 resolve to the universal
+        # system libs and link fine, so they're left alone.)
+        -DFORCE_INTERNAL_JPEG=ON
     )
 
     if [[ "$WANT_SOUND" == "1" ]]; then
