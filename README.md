@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" width="380">
+</p>
+
 # Zandronum EZ macOS Compilation
 
 <img src="docs/preview.png" width="700">
