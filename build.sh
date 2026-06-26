@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+#
+# Zandronum EZ macOS Compilation
+#
+# macOS counterpart to build.ps1. Terminal-only, "run and go".
+#
+#   ./build.sh                 # native build for this Mac's CPU (arm64 or x86_64)
+#   SOUND=1 ./build.sh         # full FMOD audio (forces x86_64 + Rosetta on Apple Silicon)
+#   ARCH=x86_64 ./build.sh     # force a specific architecture
+#
+# Layout mirrors the Windows build: src/zandronum (source), deps/ (downloads),
+# build/ (output).  Source is NEVER patched (touchless rule).
+#
+# Two working paths (both proven on an M1 Max, 2026-06-26, untouched ZA_3.2.1):
+#
+#   NATIVE (default on Apple Silicon)  -- arch = host, deps from Homebrew
+#     Builds a native arm64 binary, but WITHOUT audio: FMOD Ex 4.44.64 ships
+#     x86_64/i386 only (no arm64, closed-source, abandoned), so -DNO_SOUND=ON.
+#
+#   SOUND=1  -- arch = x86_64, runs under Rosetta 2, FULL FMOD audio + Opus VoIP
+#     Builds the x86_64 deps from source into deps/x86 (Homebrew bottles are
+#     arm64-only and won't link into an x86_64 binary), links FMOD, and stages
+#     the runtime dylibs next to the binary.  Verified to launch and initialise
+#     FMOD + VoIP under Rosetta.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEPS_DIR="$SCRIPT_ROOT/deps"
+SRC_DIR="$SCRIPT_ROOT/src"
+BUILD_DIR="$SCRIPT_ROOT/build"
+TOOLS_DIR="$SCRIPT_ROOT/tools"
+ZAN_SRC_DIR="$SRC_DIR/zandronum"
+X86_PREFIX="$DEPS_DIR/x86"            # install prefix for from-source x86_64 deps
+X86_SRC="$DEPS_DIR/x86src"            # scratch dir for x86_64 dep source trees
+
+DEFAULT_ZANDRONUM_REF="${ZANDRONUM_REF:-ZA_3.2.1}"
+CONFIGURATION="${CONFIGURATION:-Release}"
+
+HOST_ARCH="$(uname -m)"                 # arm64 | x86_64
+WANT_SOUND="${SOUND:-0}"                # 1 = build with FMOD audio
+
+# Decide target architecture: explicit ARCH wins; SOUND=1 forces x86_64; else native.
+if [[ -n "${ARCH:-}" ]]; then
+    TARGET_ARCH="$ARCH"
+elif [[ "$WANT_SOUND" == "1" ]]; then
+    TARGET_ARCH="x86_64"
+else
+    TARGET_ARCH="$HOST_ARCH"
+fi
+[[ "$WANT_SOUND" == "1" && "$TARGET_ARCH" != "x86_64" ]] && \
+    { echo "ERROR: SOUND=1 requires ARCH=x86_64 (FMOD Ex has no arm64 build)." >&2; exit 1; }
+
+NCPU="$(sysctl -n hw.ncpu)"
+
+# Dependency versions (from-source x86_64 path)
+SDL2_URL="https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.tar.gz"
+SDL12_URL="https://github.com/libsdl-org/sdl12-compat/archive/refs/tags/release-1.2.68.tar.gz"
+GLEW_URL="https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz"
+OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-3.5.1/openssl-3.5.1.tar.gz"
+FMOD_DMG_URL="https://zdoom.org/files/fmod/fmodapi44464mac-installer.dmg"
+
+# CMake 4.x dropped support for Zandronum's old cmake_minimum_required.
+CMAKE_COMPAT=(-DCMAKE_POLICY_VERSION_MINIMUM=3.5)
+# Apple frameworks Zandronum's CMake does not auto-link.
+APPLE_FRAMEWORKS="-framework CoreFoundation -framework Carbon -framework Cocoa -framework IOKit -framework OpenGL"
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+status()  { printf '\033[32m==> %s\033[0m\n' "$*"; }
+warn()    { printf '\033[33mWARNING: %s\033[0m\n' "$*"; }
+die()     { printf '\033[31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+have()    { command -v "$1" >/dev/null 2>&1; }
+
+# ---------------------------------------------------------------------------
+# Toolchain
+# ---------------------------------------------------------------------------
+ensure_xcode() {
+    status "Checking Xcode command line tools..."
+    xcode-select -p >/dev/null 2>&1 || die "Xcode CLT not found. Run: xcode-select --install"
+    have clang || die "clang not found."
+}
+
+ensure_homebrew() {
+    status "Checking Homebrew..."
+    have brew || die "Homebrew not found. Install from https://brew.sh then re-run."
+}
+
+ensure_rosetta() {
+    [[ "$HOST_ARCH" == "arm64" ]] || return 0
+    status "Ensuring Rosetta 2 (needed to run the x86_64 build)..."
+    if ! /usr/bin/pgrep oahd >/dev/null 2>&1; then
+        warn "Rosetta not detected; attempting install (may require sudo)..."
+        softwareupdate --install-rosetta --agree-to-license || \
+            die "Could not install Rosetta. Run: softwareupdate --install-rosetta"
+    fi
+    arch -x86_64 /usr/bin/true 2>/dev/null || die "x86_64 execution unavailable even with Rosetta."
+}
+
+# Tools needed regardless of path (built deps still use cmake/hg).
+ensure_base_tools() {
+    status "Installing base tools via Homebrew..."
+    local need=()
+    for p in mercurial pkg-config cmake; do
+        brew list --versions "$p" >/dev/null 2>&1 || need+=("$p")
+    done
+    (( ${#need[@]} )) && brew install "${need[@]}" || echo "Base tools present."
+}
+
+# Native-path deps come straight from Homebrew (arm64 or x86_64 host bottles).
+install_native_deps() {
+    status "Installing native dependencies via Homebrew..."
+    # Note: no FluidSynth -- the Windows build doesn't ship it either; MIDI uses
+    # the built-in OPL synth. FMOD/Opus provide all required audio.
+    local pkgs=(sdl12-compat glew openssl@3 opus) need=()
+    for p in "${pkgs[@]}"; do
+        brew list --versions "$p" >/dev/null 2>&1 || need+=("$p")
+    done
+    (( ${#need[@]} )) && brew install "${need[@]}" || echo "Native deps present."
+}
+
+# ---------------------------------------------------------------------------
+# x86_64 dependencies built from source (SOUND=1 path)
+# Homebrew bottles are arm64-only on Apple Silicon and cannot link into an
+# x86_64 binary, so we cross-compile these with clang -arch x86_64.
+# ---------------------------------------------------------------------------
+_fetch() { [[ -f "$X86_SRC/$2" ]] || curl -L --fail -o "$X86_SRC/$2" "$1"; }
+
+build_x86_deps() {
+    if [[ -f "$X86_PREFIX/lib/libSDL-1.2.0.dylib" && -f "$X86_PREFIX/lib/libopus.a" \
+          && -f "$X86_PREFIX/lib/libssl.a" && -f "$X86_PREFIX/lib/libGLEW.a" ]]; then
+        echo "x86_64 deps already built at $X86_PREFIX"; return
+    fi
+    status "Building x86_64 dependencies from source (Rosetta path)..."
+    mkdir -p "$X86_SRC" "$X86_PREFIX"
+
+    _fetch "$OPENSSL_URL" openssl.tar.gz
+    _fetch "$SDL2_URL"    SDL2.tar.gz
+    _fetch "$SDL12_URL"   sdl12compat.tar.gz
+    _fetch "$GLEW_URL"    glew.tgz
+    ( cd "$X86_SRC" && for f in openssl SDL2 sdl12compat; do tar xzf $f.tar.gz; done && tar xzf glew.tgz )
+    # Opus source ships committed in the repo.
+    ( cd "$X86_SRC" && tar xzf "$TOOLS_DIR/opus/"opus-*.tar.gz )
+
+    # --- OpenSSL (static) ---
+    status "  building OpenSSL x86_64 (static)..."
+    ( cd "$X86_SRC"/openssl-* && \
+      ./Configure darwin64-x86_64-cc no-shared no-tests --prefix="$X86_PREFIX" --openssldir="$X86_PREFIX/ssl" >/dev/null && \
+      make -j"$NCPU" >/dev/null && make install_sw >/dev/null )
+
+    # --- Opus (static) ---
+    status "  building Opus x86_64 (static)..."
+    ( cd "$X86_SRC"/opus-* && \
+      cmake -S . -B b "${CMAKE_COMPAT[@]}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF \
+        -DCMAKE_INSTALL_PREFIX="$X86_PREFIX" >/dev/null && \
+      cmake --build b --parallel "$NCPU" >/dev/null && cmake --install b >/dev/null )
+
+    # --- GLEW (static) ---
+    status "  building GLEW x86_64 (static)..."
+    ( cd "$X86_SRC"/glew-* && \
+      cmake -S build/cmake -B b "${CMAKE_COMPAT[@]}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
+        -DCMAKE_INSTALL_PREFIX="$X86_PREFIX" >/dev/null && \
+      cmake --build b --parallel "$NCPU" >/dev/null && cmake --install b >/dev/null )
+
+    # --- SDL2 (dylib) ---
+    status "  building SDL2 x86_64 (dylib)..."
+    ( cd "$X86_SRC"/SDL2-* && \
+      cmake -S . -B b "${CMAKE_COMPAT[@]}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_BUILD_TYPE=Release -DSDL_STATIC=OFF -DSDL_SHARED=ON -DSDL_TEST=OFF \
+        -DCMAKE_INSTALL_PREFIX="$X86_PREFIX" >/dev/null && \
+      cmake --build b --parallel "$NCPU" >/dev/null && cmake --install b >/dev/null )
+
+    # --- sdl12-compat (dylib, provides the SDL 1.2 API Zandronum links) ---
+    status "  building sdl12-compat x86_64 (dylib)..."
+    ( cd "$X86_SRC"/sdl12-compat-* && \
+      cmake -S . -B b "${CMAKE_COMPAT[@]}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_BUILD_TYPE=Release -DSDL12TESTS=OFF -DCMAKE_PREFIX_PATH="$X86_PREFIX" \
+        -DSDL2_INCLUDE_DIR="$X86_PREFIX/include/SDL2" \
+        -DCMAKE_INSTALL_PREFIX="$X86_PREFIX" >/dev/null && \
+      cmake --build b --parallel "$NCPU" >/dev/null && cmake --install b >/dev/null )
+
+    # Absolute install ids so the linked binary resolves the SDL dylibs at runtime.
+    install_name_tool -id "$X86_PREFIX/lib/libSDL-1.2.0.dylib" "$X86_PREFIX/lib/libSDL-1.2.0.dylib"
+    install_name_tool -id "$X86_PREFIX/lib/libSDL2-2.0.0.dylib" "$X86_PREFIX/lib/libSDL2-2.0.0.dylib"
+}
+
+# ---------------------------------------------------------------------------
+# FMOD (x86_64 only)
+# ---------------------------------------------------------------------------
+get_fmod() {
+    local fmod_dir="$DEPS_DIR/fmod"
+    [[ -f "$fmod_dir/lib/libfmodex.dylib" ]] && { echo "FMOD already staged."; return; }
+    status "Staging FMOD Ex 4.44.64..."
+    mkdir -p "$DEPS_DIR"
+    local dmg="$DEPS_DIR/fmodmac.dmg"
+    [[ -f "$dmg" ]] || curl -L --fail -o "$dmg" "$FMOD_DMG_URL"
+    local mnt; mnt="$(mktemp -d)"
+    hdiutil attach "$dmg" -nobrowse -quiet -mountpoint "$mnt"
+    local api; api="$(find "$mnt" -type d -name api -maxdepth 3 | head -1)"
+    [[ -n "$api" ]] || { hdiutil detach "$mnt" -quiet; die "FMOD api/ dir not found in dmg."; }
+    mkdir -p "$fmod_dir"; cp -R "$api/inc" "$fmod_dir/include"; cp -R "$api/lib" "$fmod_dir/lib"
+    hdiutil detach "$mnt" -quiet
+    [[ -f "$fmod_dir/lib/libfmodex.dylib" ]] || die "FMOD staging failed."
+}
+
+# ---------------------------------------------------------------------------
+# Source
+# ---------------------------------------------------------------------------
+get_source() {
+    status "Setting up Zandronum source (ref: $DEFAULT_ZANDRONUM_REF)..."
+    mkdir -p "$SRC_DIR"
+    if [[ -d "$ZAN_SRC_DIR/.hg" ]]; then
+        ( cd "$ZAN_SRC_DIR" && hg pull && hg update "$DEFAULT_ZANDRONUM_REF" )
+    else
+        rm -rf "$ZAN_SRC_DIR"
+        hg clone https://foss.heptapod.net/zandronum/zandronum-stable "$ZAN_SRC_DIR"
+        ( cd "$ZAN_SRC_DIR" && hg update "$DEFAULT_ZANDRONUM_REF" )
+    fi
+    [[ -f "$ZAN_SRC_DIR/CMakeLists.txt" ]] || die "CMakeLists.txt missing; source corrupt."
+}
+
+# ---------------------------------------------------------------------------
+# Configure + build
+# ---------------------------------------------------------------------------
+configure() {
+    status "Configuring with CMake (arch: $TARGET_ARCH, sound: $WANT_SOUND)..."
+    local args=(
+        -S "$ZAN_SRC_DIR" -B "$BUILD_DIR" "${CMAKE_COMPAT[@]}"
+        -DCMAKE_BUILD_TYPE="$CONFIGURATION"
+        -DCMAKE_OSX_ARCHITECTURES="$TARGET_ARCH"
+        -DCMAKE_EXE_LINKER_FLAGS="$APPLE_FRAMEWORKS"
+    )
+
+    if [[ "$WANT_SOUND" == "1" ]]; then
+        get_fmod
+        args+=(
+            -DSDL_INCLUDE_DIR="$X86_PREFIX/include/SDL"
+            -DSDL_LIBRARY="$X86_PREFIX/lib/libSDL-1.2.0.dylib"
+            -DGLEW_INCLUDE_DIR="$X86_PREFIX/include"
+            -DGLEW_LIBRARY="$X86_PREFIX/lib/libGLEW.a"
+            -DOPENSSL_ROOT_DIR="$X86_PREFIX" -DOPENSSL_USE_STATIC_LIBS=ON
+            -DOPUS_INCLUDE_DIR="$X86_PREFIX/include/opus"
+            -DOPUS_LIBRARIES="$X86_PREFIX/lib/libopus.a"
+            -DFMOD_INCLUDE_DIR="$DEPS_DIR/fmod/include"
+            -DFMOD_LIBRARY="$DEPS_DIR/fmod/lib/libfmodex.dylib"
+        )
+    else
+        warn "Building WITHOUT sound (-DNO_SOUND=ON). FMOD has no $TARGET_ARCH build."
+        local sdl glew ssl opus
+        sdl="$(brew --prefix sdl12-compat)"; glew="$(brew --prefix glew)"
+        ssl="$(brew --prefix openssl@3)"
+        args+=(
+            -DNO_SOUND=ON
+            -DSDL_INCLUDE_DIR="$sdl/include/SDL"
+            -DSDL_LIBRARY="$sdl/lib/libSDL-1.2.0.dylib"
+            -DGLEW_INCLUDE_DIR="$glew/include"
+            -DOPENSSL_ROOT_DIR="$ssl"
+        )
+    fi
+    cmake "${args[@]}"
+}
+
+build() {
+    status "Building Zandronum..."
+    cmake --build "$BUILD_DIR" --config "$CONFIGURATION" --parallel "$NCPU"
+
+    # Freedoom WADs for a runnable game (matches the Windows build).
+    [[ -f "$TOOLS_DIR/freedoom/freedoom2.wad" ]] && cp -n "$TOOLS_DIR/freedoom/"*.wad "$BUILD_DIR/" 2>/dev/null || true
+
+    if [[ "$WANT_SOUND" == "1" ]]; then
+        status "Staging runtime dylibs next to the binary..."
+        cp "$DEPS_DIR/fmod/lib/libfmodex.dylib" "$BUILD_DIR/"
+        cp "$X86_PREFIX/lib/libSDL2-2.0.0.dylib" "$BUILD_DIR/"
+        # FMOD's install id is "./libfmodex.dylib"; make it CWD-independent.
+        install_name_tool -change ./libfmodex.dylib @loader_path/libfmodex.dylib "$BUILD_DIR/zandronum" 2>/dev/null || true
+    fi
+}
+
+show_results() {
+    status "Build results:"
+    local bin="$BUILD_DIR/zandronum"
+    if [[ -x "$bin" ]]; then
+        echo "  binary: $bin"
+        lipo -info "$bin" | sed 's/^/  /'
+        ls -lh "$bin" | awk '{print "  size: "$5}'
+        if [[ "$WANT_SOUND" == "1" ]]; then
+            echo "  To run (under Rosetta):"
+            echo "    cd build && DYLD_LIBRARY_PATH=\"$X86_PREFIX/lib:\$PWD\" arch -x86_64 ./zandronum"
+        fi
+    else
+        warn "zandronum binary not found in $BUILD_DIR"
+    fi
+    ls -1 "$BUILD_DIR"/*.pk3 2>/dev/null | sed 's/^/  pk3: /' || true
+}
+
+# ---------------------------------------------------------------------------
+main() {
+    status "Zandronum macOS build  (host: $HOST_ARCH, target: $TARGET_ARCH, sound: $WANT_SOUND)"
+    ensure_xcode
+    ensure_homebrew
+    ensure_base_tools
+    get_source
+    if [[ "$WANT_SOUND" == "1" ]]; then
+        ensure_rosetta
+        build_x86_deps
+    else
+        install_native_deps
+    fi
+    configure
+    build
+    show_results
+    status "Done."
+}
+
+main "$@"

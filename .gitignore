@@ -1,0 +1,11 @@
+# Build artifacts
+deps/
+zandronum/
+build/
+
+# Temporary files
+*.tmp
+*.log
+
+# macOS
+.DS_Store

@@ -1,0 +1,54 @@
+name: Build macOS (Latest)
+
+on:
+  workflow_dispatch: # Allows you to trigger the workflow manually from the Actions tab
+
+jobs:
+  build:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rosetta 2
+        run: |
+          # Needed to run the Intel (FMOD) build on Apple Silicon runners.
+          sudo softwareupdate --install-rosetta --agree-to-license
+
+      - name: Write build date badge JSON
+        if: ${{ success() }}
+        run: |
+          date=$(date -u +"%Y-%m-%d %H:%M")
+          echo "{ \"schemaVersion\": 1, \"label\": \"last build\", \"message\": \"$date UTC\", \"color\": \"blue\" }" > build-date-badge.json
+
+      - name: Run Zandronum build script
+        run: |
+          SOUND=1 ./build.sh
+
+      - name: Write Zandronum version badge JSON
+        if: ${{ success() }}
+        run: |
+          cd src/zandronum
+          tags=$(hg log -r . --template "{tags}")
+          if [ -n "$tags" ] && [ "$tags" != "tip" ]; then
+            version="$tags"
+          else
+            rev=$(hg identify --id | cut -c1-12)
+            branch=$(hg branch)
+            version="$branch-$rev"
+          fi
+          echo "{ \"schemaVersion\": 1, \"label\": \"zandronum\", \"message\": \"$version\", \"color\": \"orange\" }" > ../../zandronum-version-badge.json
+
+      - name: Push badge files to badges branch
+        if: ${{ success() }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin badges || true
+          git checkout -B badges
+          git add build-date-badge.json zandronum-version-badge.json
+          git commit -m "Update badges" || exit 0
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+          git push origin badges --force
