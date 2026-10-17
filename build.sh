@@ -64,6 +64,7 @@ SDL2_URL="https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SD
 SDL12_URL="https://github.com/libsdl-org/sdl12-compat/archive/refs/tags/release-1.2.68.tar.gz"
 GLEW_URL="https://github.com/nigels-com/glew/releases/download/glew-2.2.0/glew-2.2.0.tgz"
 OPENSSL_URL="https://github.com/openssl/openssl/releases/download/openssl-3.5.1/openssl-3.5.1.tar.gz"
+ZSTD_URL="https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz"
 FMOD_DMG_URL="https://zdoom.org/files/fmod/fmodapi44464mac-installer.dmg"
 
 # CMake 4.x dropped support for Zandronum's old cmake_minimum_required.
@@ -119,7 +120,7 @@ install_native_deps() {
     status "Installing native dependencies via Homebrew..."
     # Note: no FluidSynth -- the Windows build doesn't ship it either; MIDI uses
     # the built-in OPL synth. FMOD/Opus provide all required audio.
-    local pkgs=(sdl12-compat glew openssl@3 opus) need=()
+    local pkgs=(sdl12-compat glew openssl@3 opus zstd) need=()
     for p in "${pkgs[@]}"; do
         brew list --versions "$p" >/dev/null 2>&1 || need+=("$p")
     done
@@ -135,7 +136,8 @@ _fetch() { [[ -f "$X86_SRC/$2" ]] || curl -L --fail -o "$X86_SRC/$2" "$1"; }
 
 build_x86_deps() {
     if [[ -f "$X86_PREFIX/lib/libSDL-1.2.0.dylib" && -f "$X86_PREFIX/lib/libopus.a" \
-          && -f "$X86_PREFIX/lib/libssl.a" && -f "$X86_PREFIX/lib/libGLEW.a" ]]; then
+          && -f "$X86_PREFIX/lib/libssl.a" && -f "$X86_PREFIX/lib/libGLEW.a" \
+          && -f "$X86_PREFIX/lib/libzstd.a" ]]; then
         echo "x86_64 deps already built at $X86_PREFIX"; return
     fi
     status "Building x86_64 dependencies from source (Rosetta path)..."
@@ -145,7 +147,8 @@ build_x86_deps() {
     _fetch "$SDL2_URL"    SDL2.tar.gz
     _fetch "$SDL12_URL"   sdl12compat.tar.gz
     _fetch "$GLEW_URL"    glew.tgz
-    ( cd "$X86_SRC" && for f in openssl SDL2 sdl12compat; do tar xzf $f.tar.gz; done && tar xzf glew.tgz )
+    _fetch "$ZSTD_URL"    zstd.tar.gz
+    ( cd "$X86_SRC" && for f in openssl SDL2 sdl12compat zstd; do tar xzf $f.tar.gz; done && tar xzf glew.tgz )
     # Opus source ships committed in the repo.
     ( cd "$X86_SRC" && tar xzf "$TOOLS_DIR/opus/"opus-*.tar.gz )
 
@@ -169,6 +172,14 @@ build_x86_deps() {
       cmake -S build/cmake -B b "${CMAKE_COMPAT[@]}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
         -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF \
         -DCMAKE_INSTALL_PREFIX="$X86_PREFIX" >/dev/null && \
+      cmake --build b --parallel "$NCPU" >/dev/null && cmake --install b >/dev/null )
+
+    # --- zstd (static) ---
+    status "  building zstd x86_64 (static)..."
+    ( cd "$X86_SRC"/zstd-* && \
+      cmake -S build/cmake -B b "${CMAKE_COMPAT[@]}" -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+        -DCMAKE_BUILD_TYPE=Release -DZSTD_BUILD_SHARED=OFF -DZSTD_BUILD_PROGRAMS=OFF \
+        -DZSTD_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX="$X86_PREFIX" >/dev/null && \
       cmake --build b --parallel "$NCPU" >/dev/null && cmake --install b >/dev/null )
 
     # --- SDL2 (dylib) ---
@@ -257,20 +268,24 @@ configure() {
             -DOPENSSL_ROOT_DIR="$X86_PREFIX" -DOPENSSL_USE_STATIC_LIBS=ON
             -DOPUS_INCLUDE_DIR="$X86_PREFIX/include/opus"
             -DOPUS_LIBRARIES="$X86_PREFIX/lib/libopus.a"
+            -DZSTD_INCLUDE_DIR="$X86_PREFIX/include"
+            -DZSTD_LIBRARY="$X86_PREFIX/lib/libzstd.a"
             -DFMOD_INCLUDE_DIR="$DEPS_DIR/fmod/include"
             -DFMOD_LIBRARY="$DEPS_DIR/fmod/lib/libfmodex.dylib"
         )
     else
         warn "Building WITHOUT sound (-DNO_SOUND=ON). FMOD has no $TARGET_ARCH build."
-        local sdl glew ssl opus
+        local sdl glew ssl opus zstd
         sdl="$(brew --prefix sdl12-compat)"; glew="$(brew --prefix glew)"
-        ssl="$(brew --prefix openssl@3)"
+        ssl="$(brew --prefix openssl@3)"; zstd="$(brew --prefix zstd)"
         args+=(
             -DNO_SOUND=ON
             -DSDL_INCLUDE_DIR="$sdl/include/SDL"
             -DSDL_LIBRARY="$sdl/lib/libSDL-1.2.0.dylib"
             -DGLEW_INCLUDE_DIR="$glew/include"
             -DOPENSSL_ROOT_DIR="$ssl"
+            -DZSTD_INCLUDE_DIR="$zstd/include"
+            -DZSTD_LIBRARY="$zstd/lib/libzstd.dylib"
         )
     fi
     cmake "${args[@]}"
